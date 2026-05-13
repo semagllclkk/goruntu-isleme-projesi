@@ -1,6 +1,11 @@
 import pygame
+import pygame.gfxdraw
 import sys
 import math
+import random
+from typing import List, Tuple, Dict, Any
+
+from physics_core import BallEntity, PhysicsEngine, BallManager, BallColor
 
 # --- 1. BAŞLANGIÇ VE AYARLAR ---
 pygame.mixer.pre_init(44100, -16, 2, 512)
@@ -9,10 +14,10 @@ pygame.init()
 GENISLIK = 800
 YUKSEKLIK = 600
 FPS = 60
-ARKA_PLAN_RENGI = (30, 30, 30)
+ARKA_PLAN_RENGI = (20, 20, 25)  # Biraz daha koyu pro hissiyat
 
 ekran = pygame.display.set_mode((GENISLIK, YUKSEKLIK))
-pygame.display.set_caption("El Takibi - Yaşam Döngüsü ve UI Modülü")
+pygame.display.set_caption("Fizik Motoru: Pro Oyun Mekanikleri")
 saat = pygame.time.Clock()
 
 pygame.mixer.set_num_channels(8)
@@ -21,124 +26,336 @@ try:
 except FileNotFoundError:
     piyano_sesi = None
 
-# --- YENİ: ARAYÜZ (UI) VE SKOR DEĞİŞKENLERİ ---
+# --- 2. RENK SABİTLERİ (RGB) ---
+RGB_COLORS = {
+    BallColor.BLUE: (50, 150, 255),  # Parlak Mavi
+    BallColor.GREEN: (50, 255, 100),  # Neon Yeşil
+    BallColor.YELLOW: (255, 230, 50),  # Altın Sarı
+    BallColor.PURPLE: (200, 50, 255),  # Neon Mor
+    BallColor.BLACK: (100, 100, 100),  # Gri/Siyah
+    BallColor.WHITE: (255, 255, 255),  # Beyaz
+    BallColor.RED: (255, 50, 50),  # Tehlike Kırmızı
+}
+
+# --- 3. UI VE OYUN DURUM DEĞİŞKENLERİ ---
 pygame.font.init()
-oyun_fontu = pygame.font.SysFont("Consolas", 24, bold=True)
+# Daha "Gaming" hissi için fontlar
+oyun_fontu = pygame.font.SysFont("Impact", 32)
+buyuk_font = pygame.font.SysFont("Impact", 64)
+emoji_font = pygame.font.SysFont("Segoe UI Emoji", 32)
+
 guncel_skor = 0
-skor_animasyon_zamani = 0  # Animasyonun ne zaman başladığını tutacak
+can = 3
+oyun_baslama_zamani = pygame.time.get_ticks()
 
-
-# --- 3. YAŞAM DÖNGÜSÜ: DAİRE SINIFI ---
-class Daire:
-    def __init__(self, x, y, yaricap=40):
-        self.x = x
-        self.y = y
-        self.yaricap = yaricap
-        self.renk = (255, 100, 100)
-        self.durum = "aktif"
-        self.alpha = 255
-        self.vurulma_zamani = 0
-        self.yuzey = pygame.Surface((yaricap * 2, yaricap * 2), pygame.SRCALPHA)
-
-    def vuruldu(self):
-        if self.durum == "aktif":
-            self.durum = "siliniyor"
-            self.vurulma_zamani = pygame.time.get_ticks()
-            if piyano_sesi:
-                piyano_sesi.play()
-            return True  # Vurulma başarılıysa True dön
-        return False
-
-    def guncelle(self):
-        if self.durum == "siliniyor":
-            su_anki_zaman = pygame.time.get_ticks()
-            gecen_sure = su_anki_zaman - self.vurulma_zamani
-
-            if gecen_sure >= 2000:
-                self.durum = "silindi"
-                self.alpha = 0
-            else:
-                self.alpha = 255 - int((gecen_sure / 2000) * 255)
-
-    def ciz(self, ana_ekran):
-        if self.durum != "silindi":
-            self.yuzey.fill((0, 0, 0, 0))  # Yüzeyi her karede temizle
-
-            # 1. KATMAN: İç Dolgu (Orijinal alphanın %20'si kadar şeffaf bir kırmızı)
-            ic_alpha = int(self.alpha * 0.2)
-            pygame.draw.circle(self.yuzey, (*self.renk, ic_alpha), (self.yaricap, self.yaricap), self.yaricap)
-
-            # 2. KATMAN: Dış Halka (Tam belirgin renk, 3 piksel kalınlık)
-            pygame.draw.circle(self.yuzey, (*self.renk, self.alpha), (self.yaricap, self.yaricap), self.yaricap, 3)
-
-            # Yüzeyi ana ekrana kopyala
-            ana_ekran.blit(self.yuzey, (self.x - self.yaricap, self.y - self.yaricap))
-
-
-# Mock Veri Üretimi
-daireler = [
-    Daire(200, 300),
-    Daire(400, 300),
-    Daire(600, 300)
+# --- ANA HEDEF RENK SİSTEMİ ---
+mevcut_renkler = [
+    BallColor.BLUE,
+    BallColor.GREEN,
+    BallColor.YELLOW,
+    BallColor.PURPLE,
+    BallColor.WHITE,
 ]
+main_target_color = BallColor.BLUE  # Başlangıç rengi
+current_theme_color = RGB_COLORS[main_target_color]
+skor_animasyon_zamani = 0
 
+animasyon_durumlari: Dict[str, Any] = {}
+
+
+# --- 4. YARDIMCI SINIF VE FONKSİYONLAR ---
+class EMAFilter:
+    """MediaPipe koordinatlarındaki titremeleri azaltmak için EMA (Exponential Moving Average) filtresi."""
+
+    def __init__(self, alpha: float = 0.3):
+        self.alpha = alpha
+        self.smoothed_coords: List[Tuple[float, float]] = []
+
+    def update(
+        self, current_coords: List[Tuple[float, float]]
+    ) -> List[Tuple[float, float]]:
+        if not self.smoothed_coords or len(self.smoothed_coords) != len(current_coords):
+            self.smoothed_coords = current_coords
+            return self.smoothed_coords
+
+        new_smoothed = []
+        for (sx, sy), (cx, cy) in zip(self.smoothed_coords, current_coords):
+            nx = self.alpha * cx + (1 - self.alpha) * sx
+            ny = self.alpha * cy + (1 - self.alpha) * sy
+            new_smoothed.append((nx, ny))
+
+        self.smoothed_coords = new_smoothed
+        return self.smoothed_coords
+
+
+def map_coordinates(
+    normalized_coords: List[Tuple[float, float]], width: int, height: int
+) -> List[Tuple[float, float]]:
+    return [(x * width, y * height) for x, y in normalized_coords]
+
+
+def draw_glowing_ball(surface, x, y, radius, color_rgb, alpha=255):
+    """Kürelere 'Glow' (parlama) efekti vererek profesyonel görünüm sağlar."""
+    r, g, b = color_rgb
+
+    # 3 katmanlı parlama (Dıştan içe)
+    layers = 4
+    for i in range(layers, 0, -1):
+        # Dış katmanlar daha geniş ve daha şeffaf
+        current_radius = int(radius * (1 + (i * 0.2)))
+        current_alpha = int((alpha / layers) * (1 / i))
+        pygame.gfxdraw.filled_circle(
+            surface, int(x), int(y), current_radius, (r, g, b, current_alpha)
+        )
+
+    # Çekirdek (En iç kısım, tam opak)
+    pygame.gfxdraw.aacircle(surface, int(x), int(y), int(radius), (r, g, b, alpha))
+    pygame.gfxdraw.filled_circle(surface, int(x), int(y), int(radius), (r, g, b, alpha))
+
+    # Merkeze hafif beyaz parlama (Highlight)
+    highlight_radius = int(radius * 0.4)
+    pygame.gfxdraw.filled_circle(
+        surface,
+        int(x) - int(radius * 0.2),
+        int(y) - int(radius * 0.2),
+        highlight_radius,
+        (255, 255, 255, int(alpha * 0.6)),
+    )
+
+
+# --- 5. FİZİK YÖNETİCİSİ VE BAŞLATMA ---
+manager = BallManager(screen_width=GENISLIK, screen_height=YUKSEKLIK)
+ema_filter = EMAFilter(alpha=0.3)
+
+
+def on_hit(ball: BallEntity):
+    global guncel_skor, can, main_target_color, current_theme_color, skor_animasyon_zamani
+
+    if piyano_sesi:
+        piyano_sesi.play()
+
+    if ball.color == BallColor.RED:
+        # Kırmızı vurulursa can gider
+        can -= 1
+    elif ball.color == main_target_color:
+        # Ana hedef vurulursa puan gelir
+        guncel_skor += ball.score_value
+        skor_animasyon_zamani = pygame.time.get_ticks()
+    else:
+        # Nadir bir renk vurulursa, ana tema bu renge dönüşür
+        main_target_color = ball.color
+        current_theme_color = RGB_COLORS[main_target_color]
+        guncel_skor += ball.score_value * 2  # Bonus puan
+        skor_animasyon_zamani = pygame.time.get_ticks()
+
+    # Fade-out UI Listesine Ekle
+    animasyon_durumlari[ball.id] = {
+        "x": ball.x,
+        "y": ball.y,
+        "radius": ball.radius,
+        "color_rgb": RGB_COLORS[ball.color],
+        "vurulma_zamani": pygame.time.get_ticks(),
+        "surface": pygame.Surface(
+            (ball.radius * 4, ball.radius * 4), pygame.SRCALPHA
+        ),  # Glow için yüzey geniş tutuldu
+    }
+
+
+# --- 6. ANA DÖNGÜ ---
 calisiyor = True
+game_over = False
 
-# --- 4. ANA DÖNGÜ ---
 while calisiyor:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             calisiyor = False
 
-        elif event.type == pygame.MOUSEBUTTONDOWN:
-            fare_x, fare_y = event.pos
-            for daire in daireler:
-                if daire.durum == "aktif":
-                    mesafe = math.sqrt((fare_x - daire.x) ** 2 + (fare_y - daire.y) ** 2)
-                    if mesafe <= daire.yaricap:
-                        # Eğer daire başarıyla vurulduysa skoru 10 artır
-                        if daire.vuruldu():
-                            guncel_skor += 10
-                            skor_animasyon_zamani = pygame.time.get_ticks()
+    if not game_over:
+        # --- ZORLUK VE SPAWN MANTIĞI ---
+        gecen_oyun_suresi = (
+            pygame.time.get_ticks() - oyun_baslama_zamani
+        ) / 1000.0  # Saniye
 
-    # 1. Ekranı temizle
+        # Zamanla spawn sıklığı azalır ama kırmızıların ağırlığı artar
+        # Base spawn ihtimali daha düşük (%2 - %3 arası)
+        spawn_chance = max(0.015, 0.03 - (gecen_oyun_suresi / 5000))
+
+        if random.random() < spawn_chance:
+            zorluk = 1.0 + (gecen_oyun_suresi / 60.0)  # Her dakikada hız katlanır
+
+            # Renk Seçimi (Weighted Random)
+            # Zaman ilerledikçe Kırmızı ihtimali artar.
+            red_weight = min(0.5, 0.1 + (gecen_oyun_suresi / 200.0))
+
+            # Nadir renk (Main Target ve Kırmızı harici) ihtimali sabittir: %10
+            rare_weight = 0.10
+
+            # Kalan ihtimal Main Target'a aittir
+            main_weight = 1.0 - (red_weight + rare_weight)
+
+            rnd = random.random()
+            if rnd < red_weight:
+                secilen_renk = BallColor.RED
+            elif rnd < red_weight + rare_weight:
+                # Nadir renk seçimi
+                uygun_nadirler = [
+                    c
+                    for c in mevcut_renkler
+                    if c != main_target_color and c != BallColor.RED
+                ]
+                secilen_renk = random.choice(uygun_nadirler)
+            else:
+                secilen_renk = main_target_color
+
+            # Top Yarıçapı Küçültüldü: 20.0
+            manager.spawn_ball(
+                radius=20.0,
+                base_velocity=3.0,
+                difficulty_multiplier=zorluk,
+                color=secilen_renk,
+            )
+
+        manager.update()
+
+        # MOCK MediaPipe
+        fare_x, fare_y = pygame.mouse.get_pos()
+        mock_normalized_coords = [(fare_x / GENISLIK, fare_y / YUKSEKLIK)]
+
+        pixel_coords = map_coordinates(mock_normalized_coords, GENISLIK, YUKSEKLIK)
+        smoothed_pixel_coords = ema_filter.update(pixel_coords)
+
+        PhysicsEngine.check_collisions(
+            manager.get_active_balls(), smoothed_pixel_coords, on_hit
+        )
+
+        if can <= 0:
+            game_over = True
+
+    # --- ÇİZİM ---
     ekran.fill(ARKA_PLAN_RENGI)
 
-    # 2. Daireleri güncelle ve çiz
-    for daire in daireler:
-        daire.guncelle()
-        daire.ciz(ekran)
+    # Arka planda hedef rengin hafif bir parlaması (Ambiance)
+    pygame.gfxdraw.filled_circle(
+        ekran, GENISLIK // 2, YUKSEKLIK // 2, 400, (*current_theme_color, 15)
+    )
 
-    # --- 3. YENİ: ANİMASYONLU SKORU EKRANA ÇİZME ---
-    su_anki_zaman = pygame.time.get_ticks()
-    olcek_carpani = 1.0  # Varsayılan boyut
-    gecen_animasyon_suresi = su_anki_zaman - skor_animasyon_zamani
+    if game_over:
+        bitis_metni = buyuk_font.render("GAME OVER", True, current_theme_color)
+        skor_metni = oyun_fontu.render(f"Skor: {guncel_skor}", True, (255, 255, 255))
+        ekran.blit(
+            bitis_metni,
+            bitis_metni.get_rect(center=(GENISLIK // 2, YUKSEKLIK // 2 - 40)),
+        )
+        ekran.blit(
+            skor_metni, skor_metni.get_rect(center=(GENISLIK // 2, YUKSEKLIK // 2 + 40))
+        )
+    else:
+        # 1. Aktif Topları Çiz (Glow Efekti ile)
+        # Efektlerin düzgün gözükmesi için surface kullanıyoruz
+        for ball in manager.get_active_balls():
+            if not ball.is_hit:
+                # Topları doğrudan ekrana glow fonksiyonu ile çizemeyiz çünkü alpha blending doğrudan ana ekranda çalışmayabilir.
+                # Geçici bir yüzey yaratıp oraya çizmek daha garantidir.
+                temp_surface = pygame.Surface(
+                    (ball.radius * 4, ball.radius * 4), pygame.SRCALPHA
+                )
+                draw_glowing_ball(
+                    temp_surface,
+                    ball.radius * 2,
+                    ball.radius * 2,
+                    ball.radius,
+                    RGB_COLORS[ball.color],
+                    alpha=255,
+                )
+                ekran.blit(
+                    temp_surface,
+                    (int(ball.x - ball.radius * 2), int(ball.y - ball.radius * 2)),
+                )
 
-    # Eğer puan alınmasının üzerinden 300 milisaniyeden az zaman geçtiyse yazıyı büyüt
-    if gecen_animasyon_suresi < 300:
-        oran = gecen_animasyon_suresi / 300
-        # Sinüs dalgası kullanarak yumuşak bir şişme/inme efekti yaratıyoruz
-        olcek_carpani = 1.0 + 0.5 * math.sin(oran * math.pi)
+        # 2. Fade-Out Animasyonları
+        su_anki_zaman = pygame.time.get_ticks()
+        silinecek_idler = []
 
-    # Önce yazıyı normal boyutta hazırla
-    skor_metni = oyun_fontu.render(f"Skor: {guncel_skor}", True, (255, 255, 255))
+        for b_id, anim_data in animasyon_durumlari.items():
+            gecen_sure = su_anki_zaman - anim_data["vurulma_zamani"]
 
-    # Ölçek çarpanı 1.0'dan büyükse yazıyı o oranda büyüt
-    if olcek_carpani > 1.0:
-        orijinal_genislik, orijinal_yukseklik = skor_metni.get_size()
-        yeni_genislik = int(orijinal_genislik * olcek_carpani)
-        yeni_yukseklik = int(orijinal_yukseklik * olcek_carpani)
-        skor_metni = pygame.transform.smoothscale(skor_metni, (yeni_genislik, yeni_yukseklik))
+            if gecen_sure >= 1000:  # Fade-out süresi biraz kısaltıldı (Hızlı aksiyon)
+                silinecek_idler.append(b_id)
+            else:
+                alpha = 255 - int((gecen_sure / 1000) * 255)
+                yuzey = anim_data["surface"]
+                yuzey.fill((0, 0, 0, 0))
 
-    # Yazıyı sol üstten değil, "Merkezden" sabitleyerek ekrana koy.
-    # Böylece yazı büyürken sağa veya aşağı kaymaz, olduğu yerde patlar.
-    skor_kutusu = skor_metni.get_rect()
-    skor_kutusu.center = (100, 40)  # Ekrandaki sabit merkezi (X=100, Y=40)
+                yaricap = anim_data["radius"]
+                draw_glowing_ball(
+                    yuzey,
+                    yaricap * 2,
+                    yaricap * 2,
+                    yaricap,
+                    anim_data["color_rgb"],
+                    alpha=alpha,
+                )
 
-    ekran.blit(skor_metni, skor_kutusu)
-    # -----------------------------------------------
+                ekran.blit(
+                    yuzey,
+                    (
+                        int(anim_data["x"] - yaricap * 2),
+                        int(anim_data["y"] - yaricap * 2),
+                    ),
+                )
 
-    # 4. Ekranı tazele ve FPS'i bekle
+        for b_id in silinecek_idler:
+            del animasyon_durumlari[b_id]
+
+        # 3. Can Göstergesi (Emoji)
+        # Font emoji desteklemiyorsa kutu çıkar, ama Windows "Segoe UI Emoji" destekler.
+        try:
+            can_metni = emoji_font.render("❤️" * can, True, (255, 50, 50))
+            ekran.blit(can_metni, (GENISLIK - 150, 20))
+        except Exception:
+            # Fallback (Eğer emojiler renderlanamazsa)
+            can_metni = oyun_fontu.render(f"Can: {can}", True, (255, 50, 50))
+            ekran.blit(can_metni, (GENISLIK - 120, 20))
+
+        # Hedef Renk Göstergesi
+        hedef_yazi = oyun_fontu.render("HEDEF RENK", True, (200, 200, 200))
+        ekran.blit(hedef_yazi, (GENISLIK // 2 - hedef_yazi.get_width() // 2, 10))
+        pygame.gfxdraw.filled_circle(ekran, GENISLIK // 2, 55, 10, current_theme_color)
+        pygame.gfxdraw.aacircle(ekran, GENISLIK // 2, 55, 10, (255, 255, 255))
+
+        # 4. Tema Renkli ve Animasyonlu Skor Göstergesi
+        olcek_carpani = 1.0
+        gecen_animasyon_suresi = su_anki_zaman - skor_animasyon_zamani
+
+        if gecen_animasyon_suresi < 300:
+            oran = gecen_animasyon_suresi / 300
+            olcek_carpani = 1.0 + 0.5 * math.sin(oran * math.pi)
+
+        skor_metni = oyun_fontu.render(
+            f"Skor: {guncel_skor}", True, current_theme_color
+        )
+
+        if olcek_carpani > 1.0:
+            orijinal_genislik, orijinal_yukseklik = skor_metni.get_size()
+            yeni_genislik = int(orijinal_genislik * olcek_carpani)
+            yeni_yukseklik = int(orijinal_yukseklik * olcek_carpani)
+            skor_metni = pygame.transform.smoothscale(
+                skor_metni, (yeni_genislik, yeni_yukseklik)
+            )
+
+        skor_kutusu = skor_metni.get_rect()
+        skor_kutusu.center = (100, 40)
+
+        ekran.blit(skor_metni, skor_kutusu)
+
+        # 5. Mock Parmak İmlecini Çiz
+        if smoothed_pixel_coords:
+            p_x, p_y = smoothed_pixel_coords[0]
+            pygame.gfxdraw.filled_circle(
+                ekran, int(p_x), int(p_y), 8, (255, 255, 255, 150)
+            )
+            pygame.gfxdraw.aacircle(ekran, int(p_x), int(p_y), 8, (255, 255, 255))
+
     pygame.display.flip()
     saat.tick(FPS)
 
