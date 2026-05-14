@@ -127,8 +127,8 @@ def draw_glowing_ball(surface, x, y, radius, color_rgb, alpha=255):
 
 # --- 5. FİZİK YÖNETİCİSİ VE BAŞLATMA ---
 manager = BallManager(screen_width=GENISLIK, screen_height=YUKSEKLIK)
-ema_filter = EMAFilter(alpha=0.3)
-tracker = HandTracker(smoothing_window=5)
+ema_filter = EMAFilter(alpha=0.6)  # Daha hızlı tepki için alpha artırıldı (0.3 -> 0.6)
+tracker = HandTracker(smoothing_window=3)  # Gecikmeyi azaltmak için pencere küçültüldü (5 -> 3)
 cap = cv2.VideoCapture(0)
 
 
@@ -229,13 +229,16 @@ while calisiyor:
         if success:
             frame = cv2.flip(frame, 1)  # Ayna etkisi
             h, w, _ = frame.shape
-            coords = tracker.get_finger_position(frame)
+            all_coords = tracker.get_fingers_positions(frame)
 
-            if coords:
+            if all_coords:
                 # Kameradan gelen koordinatları oyun ekranına ölçekle
-                norm_x = coords[0] / w
-                norm_y = coords[1] / h
-                pixel_coords = [(norm_x * GENISLIK, norm_y * YUKSEKLIK)]
+                pixel_coords = []
+                for coords in all_coords:
+                    norm_x = coords[0] / w
+                    norm_y = coords[1] / h
+                    pixel_coords.append((norm_x * GENISLIK, norm_y * YUKSEKLIK))
+                
                 smoothed_pixel_coords = ema_filter.update(pixel_coords)
 
             # Önizleme için frame'i hazırla
@@ -368,8 +371,7 @@ while calisiyor:
         ekran.blit(skor_metni, skor_kutusu)
 
         # 5. Parmak İmlecini Çiz
-        if smoothed_pixel_coords:
-            p_x, p_y = smoothed_pixel_coords[0]
+        for p_x, p_y in smoothed_pixel_coords:
             pygame.gfxdraw.filled_circle(
                 ekran, int(p_x), int(p_y), 12, (255, 255, 255, 180)
             )

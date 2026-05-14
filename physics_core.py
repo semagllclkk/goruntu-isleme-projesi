@@ -75,8 +75,9 @@ class PhysicsEngine:
                     ball.x, ball.y, finger_x, finger_y
                 )
 
-                # Çarpışma gerçekleşti mi? (d < radius)
-                if distance < ball.radius:
+                # Çarpışma gerçekleşti mi? (d < radius + buffer)
+                # Hassasiyeti artırmak için 15 piksellik bir tolerans (buffer) eklendi.
+                if distance < (ball.radius + 15):
                     ball.is_hit = True
                     # 3. Modülün (fade-out) asenkron fonksiyonunu tetiklemek için callback çağrılır
                     on_hit_callback(ball)
