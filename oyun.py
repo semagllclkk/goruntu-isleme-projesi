@@ -8,6 +8,7 @@ from typing import List, Tuple, Dict, Any
 
 from physics_core import BallEntity, PhysicsEngine, BallManager, BallColor
 from hand_tracking import HandTracker
+from piano_sounds import create_piano_sounds
 
 # --- 1. BAŞLANGIÇ VE AYARLAR ---
 pygame.mixer.pre_init(44100, -16, 2, 512)
@@ -17,6 +18,7 @@ GENISLIK = 800
 YUKSEKLIK = 600
 FPS = 60
 ARKA_PLAN_RENGI = (20, 20, 25)  # Biraz daha koyu pro hissiyat
+SURE_LIMITI = 120 * 1000  # 2 dakika (ms cinsinden)
 
 ekran = pygame.display.set_mode((GENISLIK, YUKSEKLIK))
 pygame.display.set_caption("Fizik Motoru: Pro Oyun Mekanikleri")
@@ -27,6 +29,20 @@ try:
     piyano_sesi = pygame.mixer.Sound("piyano-kısa.mp3")
 except FileNotFoundError:
     piyano_sesi = None
+
+# Piano notalarını yükle
+piyano_sesleri = create_piano_sounds()
+
+# Renk-Nota Mapping
+RENK_NOTA_MAP = {
+    BallColor.BLUE: "C",
+    BallColor.GREEN: "E",
+    BallColor.YELLOW: "G",
+    BallColor.PURPLE: "A",
+    BallColor.WHITE: "D",
+    BallColor.RED: "B",
+    BallColor.BLACK: "F",
+}
 
 # --- 2. RENK SABİTLERİ (RGB) ---
 RGB_COLORS = {
@@ -137,6 +153,15 @@ def on_hit(ball: BallEntity):
 
     if piyano_sesi:
         piyano_sesi.play()
+
+    # Piano notası çal
+    if ball.color in RENK_NOTA_MAP:
+        nota = RENK_NOTA_MAP[ball.color]
+        if nota in piyano_sesleri:
+            try:
+                piyano_sesleri[nota].play()
+            except Exception as e:
+                print(f"⚠️  Nota çalma hatası ({nota}): {e}")
 
     if ball.color == BallColor.RED:
         # Kırmızı vurulursa can gider
@@ -251,6 +276,10 @@ while calisiyor:
         )
 
         if can <= 0:
+            game_over = True
+
+        # 2 dakika sonra game over
+        if gecen_oyun_suresi * 1000 >= SURE_LIMITI:
             game_over = True
 
     # --- ÇİZİM ---
@@ -370,7 +399,14 @@ while calisiyor:
 
         ekran.blit(skor_metni, skor_kutusu)
 
-        # 5. Parmak İmlecini Çiz
+        # 5. Kalan Süre Göstergesi
+        kalan_sure_ms = max(0, SURE_LIMITI - int(gecen_oyun_suresi * 1000))
+        dakika = kalan_sure_ms // 60000
+        saniye = (kalan_sure_ms % 60000) // 1000
+        sure_metni = oyun_fontu.render(f"⏱️  {dakika}:{saniye:02d}", True, (255, 200, 50))
+        ekran.blit(sure_metni, (GENISLIK - 200, YUKSEKLIK - 50))
+
+        # 6. Parmak İmlecini Çiz
         for p_x, p_y in smoothed_pixel_coords:
             pygame.gfxdraw.filled_circle(
                 ekran, int(p_x), int(p_y), 12, (255, 255, 255, 180)
@@ -379,7 +415,7 @@ while calisiyor:
             # Hedef belirteci
             pygame.gfxdraw.aacircle(ekran, int(p_x), int(p_y), 20, current_theme_color)
 
-        # 6. Kamera Önizlemesini Çiz
+        # 7. Kamera Önizlemesini Çiz
         if camera_preview_surf:
             # Kenarlık
             pygame.draw.rect(ekran, (100, 100, 100), (8, YUKSEKLIK - 132, 164, 124), 2)
