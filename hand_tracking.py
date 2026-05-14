@@ -12,7 +12,7 @@ class HandTracker:
     
     def __init__(self, static_image_mode: bool = False, 
                  max_num_hands: int = 1, 
-                 min_detection_confidence: float = 0.7, 
+                 min_detection_confidence: float = 0.5, 
                  min_tracking_confidence: float = 0.5,
                  smoothing_window: int = 5):
         """

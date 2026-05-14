@@ -3,9 +3,11 @@ import pygame.gfxdraw
 import sys
 import math
 import random
+import cv2
 from typing import List, Tuple, Dict, Any
 
 from physics_core import BallEntity, PhysicsEngine, BallManager, BallColor
+from hand_tracking import HandTracker
 
 # --- 1. BAŞLANGIÇ VE AYARLAR ---
 pygame.mixer.pre_init(44100, -16, 2, 512)
@@ -126,6 +128,8 @@ def draw_glowing_ball(surface, x, y, radius, color_rgb, alpha=255):
 # --- 5. FİZİK YÖNETİCİSİ VE BAŞLATMA ---
 manager = BallManager(screen_width=GENISLIK, screen_height=YUKSEKLIK)
 ema_filter = EMAFilter(alpha=0.3)
+tracker = HandTracker(smoothing_window=5)
+cap = cv2.VideoCapture(0)
 
 
 def on_hit(ball: BallEntity):
@@ -217,12 +221,27 @@ while calisiyor:
 
         manager.update()
 
-        # MOCK MediaPipe
-        fare_x, fare_y = pygame.mouse.get_pos()
-        mock_normalized_coords = [(fare_x / GENISLIK, fare_y / YUKSEKLIK)]
+        # --- EL TAKİBİ ENTEGRASYONU ---
+        success, frame = cap.read()
+        smoothed_pixel_coords = []
+        camera_preview_surf = None
 
-        pixel_coords = map_coordinates(mock_normalized_coords, GENISLIK, YUKSEKLIK)
-        smoothed_pixel_coords = ema_filter.update(pixel_coords)
+        if success:
+            frame = cv2.flip(frame, 1)  # Ayna etkisi
+            h, w, _ = frame.shape
+            coords = tracker.get_finger_position(frame)
+
+            if coords:
+                # Kameradan gelen koordinatları oyun ekranına ölçekle
+                norm_x = coords[0] / w
+                norm_y = coords[1] / h
+                pixel_coords = [(norm_x * GENISLIK, norm_y * YUKSEKLIK)]
+                smoothed_pixel_coords = ema_filter.update(pixel_coords)
+
+            # Önizleme için frame'i hazırla
+            small_frame = cv2.resize(frame, (160, 120))
+            small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+            camera_preview_surf = pygame.surfarray.make_surface(small_frame.swapaxes(0, 1))
 
         PhysicsEngine.check_collisions(
             manager.get_active_balls(), smoothed_pixel_coords, on_hit
@@ -348,16 +367,29 @@ while calisiyor:
 
         ekran.blit(skor_metni, skor_kutusu)
 
-        # 5. Mock Parmak İmlecini Çiz
+        # 5. Parmak İmlecini Çiz
         if smoothed_pixel_coords:
             p_x, p_y = smoothed_pixel_coords[0]
             pygame.gfxdraw.filled_circle(
-                ekran, int(p_x), int(p_y), 8, (255, 255, 255, 150)
+                ekran, int(p_x), int(p_y), 12, (255, 255, 255, 180)
             )
-            pygame.gfxdraw.aacircle(ekran, int(p_x), int(p_y), 8, (255, 255, 255))
+            pygame.gfxdraw.aacircle(ekran, int(p_x), int(p_y), 12, (255, 255, 255))
+            # Hedef belirteci
+            pygame.gfxdraw.aacircle(ekran, int(p_x), int(p_y), 20, current_theme_color)
+
+        # 6. Kamera Önizlemesini Çiz
+        if camera_preview_surf:
+            # Kenarlık
+            pygame.draw.rect(ekran, (100, 100, 100), (8, YUKSEKLIK - 132, 164, 124), 2)
+            ekran.blit(camera_preview_surf, (10, YUKSEKLIK - 130))
+            # "CANLI" yazısı
+            canli_metni = pygame.font.SysFont("Arial", 12, bold=True).render("LIVE CAMERA", True, (255, 0, 0))
+            ekran.blit(canli_metni, (15, YUKSEKLIK - 125))
 
     pygame.display.flip()
     saat.tick(FPS)
 
 pygame.quit()
+cap.release()
+cv2.destroyAllWindows()
 sys.exit()
